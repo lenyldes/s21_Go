@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Крестики-нолики</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #f5f5f5;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      color: #1a1a1a;
+    }
+
+    .container {
+      background: white;
+      border-radius: 16px;
+      padding: 2rem;
+      width: 380px;
+      box-shadow: 0 2px 20px rgba(0,0,0,0.08);
+    }
+
+    h1 {
+      font-size: 20px;
+      font-weight: 500;
+      margin-bottom: 1.5rem;
+      text-align: center;
+      color: #1a1a1a;
+    }
+
+    .url-row {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 1.5rem;
+    }
+
+    input[type="text"] {
+      flex: 1;
+      padding: 8px 12px;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      font-size: 13px;
+      outline: none;
+      color: #1a1a1a;
+      background: white;
+    }
+
+    input[type="text"]:focus {
+      border-color: #888;
+    }
+
+    .btn {
+      padding: 8px 16px;
+      border-radius: 8px;
+      border: 1px solid #ddd;
+      background: white;
+      font-size: 13px;
+      cursor: pointer;
+      color: #1a1a1a;
+      white-space: nowrap;
+      transition: background 0.15s;
+    }
+
+    .btn:hover { background: #f5f5f5; }
+
+    .btn-primary {
+      background: #1a1a1a;
+      color: white;
+      border-color: #1a1a1a;
+    }
+
+    .btn-primary:hover { background: #333; }
+
+    .board {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+      margin-bottom: 1.5rem;
+    }
+
+    .cell {
+      aspect-ratio: 1;
+      border: 1px solid #ddd;
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 40px;
+      font-weight: 500;
+      cursor: pointer;
+      background: white;
+      transition: background 0.15s;
+      user-select: none;
+    }
+
+    .cell:hover:not(.taken) { background: #f9f9f9; }
+    .cell.taken { cursor: default; }
+    .cell.x { color: #185FA5; }
+    .cell.o { color: #993C1D; }
+
+    #status {
+      text-align: center;
+      font-size: 14px;
+      color: #666;
+      min-height: 22px;
+      margin-bottom: 8px;
+    }
+
+    #status.win  { color: #3B6D11; font-weight: 500; }
+    #status.lose { color: #A32D2D; font-weight: 500; }
+    #status.draw { color: #633806; font-weight: 500; }
+
+    #uuid {
+      text-align: center;
+      font-size: 11px;
+      color: #aaa;
+      font-family: monospace;
+      word-break: break-all;
+    }
+
+    .legend {
+      display: flex;
+      justify-content: center;
+      gap: 20px;
+      margin-bottom: 1rem;
+      font-size: 13px;
+      color: #666;
+    }
+
+    .legend span { display: flex; align-items: center; gap: 4px; }
+    .dot-x { color: #185FA5; font-weight: 500; }
+    .dot-o { color: #993C1D; font-weight: 500; }
+  </style>
+</head>
+<body>
+<div class="container">
+  <h1>Крестики-нолики</h1>
+
+<div class="url-row">
+<input type="text" id="url-input" value="" placeholder="http://localhost:8080" />
+<button class="btn btn-primary" onclick="newGame()">Новая игра</button>
+</div>
+
+  <div class="legend">
+    <span><span class="dot-x">X</span> — компьютер</span>
+    <span><span class="dot-o">O</span> — ты</span>
+  </div>
+
+  <div class="board" id="board"></div>
+
+  <div id="status">Нажми «Новая игра» чтобы начать</div>
+  <div id="uuid"></div>
+</div>
+
+<script>
+  let gameUUID = null;
+  let board = [[0,0,0],[0,0,0],[0,0,0]];
+  let gameOver = false;
+
+function getBase() {
+const val = document.getElementById('url-input').value;
+return val ? val.replace(/\/$/, '') : window.location.origin;
+}
+
+// Автоматически установить текущий URL при загрузке
+document.addEventListener('DOMContentLoaded', function() {
+document.getElementById('url-input').value = window.location.origin;
+});
+
+  function setStatus(msg, type) {
+    const el = document.getElementById('status');
+    el.textContent = msg;
+    el.className = type || '';
+  }
+
+  function renderBoard() {
+    const el = document.getElementById('board');
+    el.innerHTML = '';
+    const symbols = ['', 'X', 'O'];
+    const classes = ['', 'x', 'o'];
+    for (let i = 0; i < 3; i++) {
+      for (let j = 0; j < 3; j++) {
+        const cell = document.createElement('div');
+        const val = board[i][j];
+        cell.className = 'cell' + (val ? ' taken ' + classes[val] : '');
+        cell.textContent = symbols[val];
+        if (!val && !gameOver && gameUUID) {
+          cell.onclick = () => makeMove(i, j);
+        }
+        el.appendChild(cell);
+      }
+    }
+  }
+
+  async function newGame() {
+    setStatus('Создаём игру...');
+    try {
+      const res = await fetch(getBase() + '/game', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      if (!res.ok) throw new Error('Ошибка сервера: ' + res.status);
+      const data = await res.json();
+      gameUUID = data.uuid;
+      board = data.board;
+      gameOver = false;
+      renderBoard();
+      setStatus('Твой ход! Кликни на клетку.');
+      document.getElementById('uuid').textContent = 'UUID: ' + gameUUID;
+    } catch(e) {
+      setStatus('Не удалось подключиться к серверу. Убедись что сервер запущен.', 'lose');
+      console.error(e);
+    }
+  }
+
+  async function makeMove(row, col) {
+    if (gameOver || !gameUUID || board[row][col] !== 0) return;
+    board[row][col] = 2;
+    renderBoard();
+    setStatus('Компьютер думает...');
+    try {
+      const res = await fetch(getBase() + '/game/' + gameUUID, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ board })
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        board[row][col] = 0;
+        renderBoard();
+        setStatus('Ошибка: ' + text, 'lose');
+        return;
+      }
+      const data = await res.json();
+      board = data.board;
+      gameOver = data.game_over;
+      renderBoard();
+      if (gameOver) {
+        const hasX = checkWin(1);
+        const hasO = checkWin(2);
+        if (hasX) setStatus('Компьютер выиграл! Попробуй ещё раз.', 'lose');
+        else if (hasO) setStatus('Ты выиграл! Поздравляем!', 'win');
+        else setStatus('Ничья! Хорошая игра.', 'draw');
+      } else {
+        setStatus('Твой ход!');
+      }
+    } catch(e) {
+      board[row][col] = 0;
+      renderBoard();
+      setStatus('Ошибка соединения с сервером.', 'lose');
+      console.error(e);
+    }
+  }
+
+  function checkWin(player) {
+    for (let i = 0; i < 3; i++) {
+      if (board[i].every(c => c === player)) return true;
+      if ([0,1,2].every(r => board[r][i] === player)) return true;
+    }
+    if ([0,1,2].every(i => board[i][i] === player)) return true;
+    if ([0,1,2].every(i => board[i][2-i] === player)) return true;
+    return false;
+  }
+
+  renderBoard();
+</script>
+</body>
+</html>
