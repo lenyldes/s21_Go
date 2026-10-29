@@ -1,0 +1,114 @@
+name: be3
+services:
+  nginx:
+    container_name: nginx
+    image: nginx:1.30.6-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/html:/data/www:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+    depends_on:
+      - shopapp
+      - shopapp_read1
+      - shopapp_read2
+      - pgadmin
+  pgadmin:
+    container_name: pgadmin
+    image: dpage/pgadmin4
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD}
+  shopdb:
+    container_name: shopdb
+    image: postgres:18.1-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${SHOP_DB}
+      SHOP_READONLY_PASSWORD: ${SHOP_READONLY_PASSWORD}
+    volumes:
+      - db_shop:/var/lib/postgresql
+      # Схема выполняется только при первом запуске с пустым каталогом данных.
+      - ./shop/internal/repository/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+      # Префикс zz запускает создание пользователя после schema.sql.
+      - ./shop/internal/repository/readonly.sql:/docker-entrypoint-initdb.d/zz-readonly.sql:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "${POSTGRES_USER}", "-d", "${SHOP_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+  authdb:
+    container_name: authdb
+    image: postgres:18.1-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${AUTH_DB}
+    volumes:
+     - ./auth/db/init.sql:/docker-entrypoint-initdb.d/init.sql
+     - db_auth:/var/lib/postgresql
+    healthcheck:
+      test: pg_isready -p 5432 -U ${POSTGRES_USER}
+      interval: 1h
+      retries: 3
+      start_period: 10s
+  shopapp:
+    container_name: shopapp
+    build: shop
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@shopdb:5432/${SHOP_DB}?sslmode=disable
+      AUTH_ADDRESS: authapp:${AUTH_APP_PORT}
+    depends_on:
+      shopdb:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+  shopapp_read1:
+    container_name: shopapp_read1
+    build: shop
+    environment:
+      DATABASE_URL: postgres://shop_reader:${SHOP_READONLY_PASSWORD}@shopdb:5432/${SHOP_DB}?sslmode=disable
+      AUTH_ADDRESS: authapp:${AUTH_APP_PORT}
+    depends_on:
+      shopdb:
+        condition: service_healthy
+    ports:
+      - "8081:8080"
+  shopapp_read2:
+    container_name: shopapp_read2
+    build: shop
+    environment:
+      DATABASE_URL: postgres://shop_reader:${SHOP_READONLY_PASSWORD}@shopdb:5432/${SHOP_DB}?sslmode=disable
+      AUTH_ADDRESS: authapp:${AUTH_APP_PORT}
+    depends_on:
+      shopdb:
+        condition: service_healthy
+    ports:
+      - "8082:8080"
+  authapp:
+    container_name: authapp
+    build: auth
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${AUTH_DB}
+      POSTGRES_HOST: authdb
+      POSTGRES_PORT: 5432
+      APP_PORT: ${AUTH_APP_PORT}
+      ACCESS_TOKEN_KEY: ${ACCESS_TOKEN_KEY}
+      REFRESH_TOKEN_KEY: ${REFRESH_TOKEN_KEY}
+      ACCESS_TOKEN_TTL_MINS: ${ACCESS_TOKEN_TTL_MINS}
+      REFRESH_TOKEN_TTL_DAYS: ${REFRESH_TOKEN_TTL_DAYS}
+      LEEWAY_MINS: ${LEEWAY_MINS}
+      ISSUER: ${ISSUER}
+    depends_on:
+      authdb:
+        condition: service_healthy
+
+volumes:
+  db_shop:
+  db_auth:

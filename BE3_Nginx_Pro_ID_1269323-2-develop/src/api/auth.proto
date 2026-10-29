@@ -1,0 +1,70 @@
+syntax = "proto3";
+
+package auth;
+
+option go_package = "src/api";
+
+
+service AuthService {
+  rpc User(UserRequest) returns(UserResponse);
+  rpc Signup(SignupRequest) returns (TokensResponse);
+  rpc Signin(SigninRequest) returns (TokensResponse);
+  rpc Refresh(RefreshTokensRequest) returns (TokensResponse);
+  rpc ValidateToken(AccessTokenRequest) returns (EmptyMessage);
+  rpc ResetPassword(ResetPasswordRequest) returns (EmptyMessage);
+  rpc ChangePassword(ChangePasswordRequest) returns (EmptyMessage);
+}
+
+message UserRequest {
+  oneof identity {
+    string id = 1;
+    string login = 2;
+  }
+}
+
+message UserResponse {
+  string id = 1;
+  string login = 2;
+  string email = 3;
+  string role = 4;
+}
+
+message SignupRequest {
+  string login = 1;
+  string email = 2;
+  string role = 3;
+  string password = 4;
+  string name = 5;
+  string surname = 6;
+  string phonenumber = 7;
+}
+
+message SigninRequest {
+  string login = 1;
+  string password = 2;
+}
+
+message TokensResponse {
+  string access_token = 1;
+  string refresh_token = 2;
+}
+
+message RefreshTokensRequest {
+  string refresh_token = 1;
+}
+
+message AccessTokenRequest {
+  string access_token = 1;
+}
+
+message ResetPasswordRequest {
+  string login = 1;
+}
+
+message ChangePasswordRequest {
+  string login = 1;
+  string currentPassword = 2;
+  string newPassword = 3;
+}
+
+message EmptyMessage {}
