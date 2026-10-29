@@ -1,0 +1,36 @@
+name: tictactoe
+services:
+  database:
+    container_name: tictactoe_db
+    image: postgres:18.1-alpine
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: tictactoe
+    volumes:
+      - db:/var/lib/postgresql
+    ports:
+      - 5432:5432
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "postgres", "-d", "tictactoe"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  app:
+    container_name: tictactoe_app
+    image: golang:1.25.6-alpine
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: go run ./di/cmd
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@database:5432/tictactoe?sslmode=disable
+    ports:
+      - 8000:8000
+    depends_on:
+      database:
+        condition: service_healthy
+
+volumes:
+  db:
