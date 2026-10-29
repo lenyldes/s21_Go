@@ -1,279 +1,604 @@
-# Nginx
+# Высоконагруженный обратный прокси Nginx, балансировка нагрузки и микросервисная архитектура (Nginx Reverse Proxy, Load Balancing & Microservices)
 
-💡 [Tap here](https://new.oprosso.net/p/4cb31ec3f47a4596bc758ea1861fb624) **to leave your feedback on the project**. It's anonymous and will help our team make your educational experience better. We recommend completing the survey immediately after the project.
+[![Go Version](https://img.shields.io/badge/Go-1.25%20%7C%201.26-00ADD8?style=flat&logo=go&logoColor=white)](https://golang.org/)
+[![Nginx](https://img.shields.io/badge/Nginx-1.30.6-009639?style=flat&logo=nginx&logoColor=white)](https://nginx.org/)
+[![gRPC](https://img.shields.io/badge/gRPC-Protobuf-244f5c?style=flat&logo=grpc&logoColor=white)](https://grpc.io/)
+[![PostgreSQL](https://img.shields.io/badge/Database-PostgreSQL%20(pgx%20v5)-336791?style=flat&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+[![Clean Architecture](https://img.shields.io/badge/Architecture-Clean%20Architecture-blue?style=flat)](#архитектура-и-сетевая-топология)
+[![Uber Fx](https://img.shields.io/badge/DI-Uber%20Fx-black?style=flat)](https://github.com/uber-go/fx)
+[![Docker Compose](https://img.shields.io/badge/Docker-Compose%20(8%20Services)-2496ED?style=flat&logo=docker&logoColor=white)](#оркестрация-и-развертывание-в-docker-compose)
+[![Status Completed](https://img.shields.io/badge/Status-Completed-success?style=flat)](#)
 
-## Contents
+Сделал отказоустойчивую распределённую инфраструктуру для микросервисного интернет‑магазина за обратным прокси‑сервером Nginx. Настроил интеллектуальную балансировку нагрузки между пулом Read‑Only реплик и Master‑узлом с весовым распределением (2:1:1), разделил трафик чтения и записи (CQRS‑паттерн на уровне прокси), внедрил многоуровневое кеширование HTTP‑ответов (`proxy_cache`) с дедупликацией нагрузки, сквозную компрессию контента GZIP и защищённый HTTPS/TLS‑канал с локальным центром сертификации. Разбил архитектуру сервисов на два изолированных Go‑микросервиса (Shop REST API и Auth gRPC Service) на базе Clean Architecture и DI‑контейнера Uber Fx. Сервисы общаются по высокопроизводительному протоколу gRPC/Protobuf, используют изолированные базы данных PostgreSQL с разграничением прав на уровне ролей и упакованы в согласованный стек из 8 контейнеров в Docker Compose.
 
-[[_TOC_]]
+---
 
+## О проекте
 
-## Chapter I
+В этом проекте я решал комплекс системных и инфраструктурных задач для высоконагруженного бэкенда: нужно было грамотно распределить сетевой трафик, защитить ядро системы от перегрузок, сократить время отклика клиентов и обеспечить высокую доступность (High Availability) сервисов:
 
-### What is a Web server?
-A web server is a computer that stores a website's files (HTML documents, CSS, JavaScript files, images, etc.) and delivers them to the end user device (web browser, etc.). It is connected to the Internet and can be accessed through a domain name such as mozilla.org.
+- **Обратный прокси и маршрутизация:** Сделал единую входную точку (API Gateway / Ingress) на базе Nginx 1.30 — она маршрутизирует запросы к REST API магазина, интерактивной документации Swagger UI, панели администрирования баз данных pgAdmin и раздаче статических ресурсов.
+- **Взвешенная балансировка нагрузки (2:1:1) и разделение чтения/записи:** Сегрегировал сетевой трафик по HTTP‑глаголам с помощью директивы `map`. Мутирующие запросы (`POST`, `PUT`, `DELETE`, `PATCH`) отправляю строго на главный Master‑экземпляр (`shopapp`). Запросы на чтение (`GET`) балансирую по алгоритму Weighted Round‑Robin между тремя экземплярами бэкенда (`shopapp` с весом 2, `shopapp_read1` с весом 1, `shopapp_read2` с весом 1).
+- **Кеширование ответов на стороне прокси:** Настроил общую зону памяти `proxy_cache` на 10 ГБ с временем жизни кеша 1 минута для успешных ответов (HTTP 200). Добавил диагностические заголовки `X-Cache-Status` (`HIT` / `MISS`) и `X-Upstream-Addr`, чтобы удобно отслеживать распределение запросов.
+- **Потоковая GZIP‑компрессия:** Реализовал динамическое сжатие текстовых форматов (`JSON`, `HTML`, `CSS`, `JS`, `XML`) с уровнем сжатия 6, при этом исключил бинарные медиафайлы (`PNG`, `JPEG`) — так не тратим процессорные мощности впустую.
+- **Локальный HTTPS/TLS:** Поднял самоподписанный X.509 сертификат для домена `be3.shop` с расширением SAN (Subject Alternative Name) через OpenSSL. Поддерживаю одновременную работу портов 80 (HTTP) и 443 (HTTPS).
+- **Межсервисный протокол gRPC / Protobuf:** Выделил отдельный микросервис аутентификации `Auth` — он предоставляет быстрый RPC‑интерфейс для регистрации, выпуска и ротации двухтокенных связок JWT (Access/Refresh), сброса паролей и аутентификации запросов клиентов.
+- **Безопасность баз данных и Read‑Only пользователи:** Использую два независимых инстанса PostgreSQL (`shopdb` и `authdb`). Создал роль `shop_reader` с правами только на чтение (`SELECT`) — её используют реплики чтения `shopapp_read1` и `shopapp_read2`.
+- **Чистая архитектура и Dependency Injection:** Спроектировал Go‑сервисы по принципам Clean Architecture (слои Domain, Web/API, Repository/Data), внедрил зависимости и управление жизненным циклом через Uber Fx.
 
-From a software perspective, a web server includes several components that control how web users access the files on the server, such as an HTTP server. An HTTP server is the part of the software that understands URLs (web addresses) and HTTP (the protocol your browser uses to view web pages).
-<br/>
-![web_server](misc/images/web-server.svg)
-<br/>
+---
 
-### Nginx
+## Ключевые навыки и освоенные концепции
 
-**Nginx** [engine x] is the HTTP and reverse proxy server, a mail proxy server, and a TCP/UDP general purpose proxy server, originally written by Igor Sysoev. It has been maintaining the servers of many high loaded Russian sites, such as Yandex, Mail.Ru, VKontakte, and Rambler, for a long time now. According to Netcraft statistics, Nginx maintained or proxied 21.23% of the busiest sites in February 2023.
+### 1. Nginx Reverse Proxy и интеллектуальная маршрутизация
 
-Basic HTTP server functionality:
+- **Проксирование запросов (`proxy_pass`):** Перенаправляю входящие HTTP‑запросы во внутреннюю виртуальную сеть Docker Compose к нужным контейнерам — при этом их внутренние порты не видны снаружи.
+- **Преобразование путей и редиректы:**
+  - Префикс `/api/` прозрачно подменяю на `/api/v1/` приложения;
+  - Запрос `/api/v1` возвращает HTTP‑редирект `302 Found` на интерактивный Swagger UI (`/swagger/index.html`);
+  - Статический путь `/` настроил на прямую раздачу файлов `index.html` и `image.png` из файлового хранилища `/data/www`;
+  - Маршрут `/admin/` настроил на прозрачное проксирование веб‑интерфейса pgAdmin — корректно передаю заголовок пути `X-Script-Name /admin`.
+- **Встроенный мониторинг состояния (`stub_status`):** Реализовал защищённый эндпоинт `/status`, который отдаёт метрики Nginx в реальном времени: число активных соединений, количество принятых и обработанных подключений и запросов, а также статус очередей чтения и записи.
 
-- Maintenance of static queries, index files, automatic file list creation, open file descriptor cache;
-- Accelerated reverse proxying with caching, load balancing and fault tolerance;
-- Accelerated support for FastCGI, uwsgi, SCGI and memcached servers with caching, load balancing and fault tolerance;
-- Modularity, filters, including compression (gzip), byte-ranges, chunked responses, XSLT-filter, SSI-filter, image conversion;
-- Several subrequests on the same page, handled by SSI filter through proxy or FastCGI/uwsgi/SCGI, are executed in parallel;
-- Support for SSL and TLS SNI extension;
-- HTTP/2 support with prioritization based on weights and dependencies.
+### 2. Балансировка нагрузки и CQRS на уровне прокси (Read/Write Splitting)
 
-### Reverse Proxy
+- **Динамический маппинг методов (`map $request_method`):** Я настроил маппинг так, чтобы целевая группа бэкендов выбиралась по семантике запроса:
+  ```nginx
+  map $request_method $shop_backend {
+      GET     shop_read;
+      default shop_write;
+  }
+  ```
+- **Пул записи (`upstream shop_write`):** Все методы, которые меняют состояние данных (`POST`, `PUT`, `DELETE`, `PATCH`), я направил строго на основной инстанс `shopapp`, подключённый к БД с правами на запись. Так я исключил попытки записи в Read‑Only реплики и предотвратил рассинхронизацию данных.
+- **Взвешенный пул чтения (`upstream shop_read`):** Запросы на чтение (`GET`) я распределил по трём узлам с весовыми коэффициентами:
+  - `shopapp:8080 weight=2` (основной инстанс, берёт 50 % всех GET‑запросов);
+  - `shopapp_read1:8080 weight=1` (первая реплика чтения, берёт 25 % GET‑запросов);
+  - `shopapp_read2:8080 weight=1` (вторая реплика чтения, берёт 25 % GET‑запросов);
+  - Итоговая пропорция распределения: **2:1:1** (50 % : 25 % : 25 %).
 
-Forward proxy works on behalf of clients, which means we need to configure the browser (client) to go through the direct proxy server. Reverse proxy works on behalf of the servers, so the client does not know that it is going to the proxy server.
+### 3. Кеширование запросов на уровне прокси (`proxy_cache`)
 
-Reverse proxy takes requests from clients to proxy them to the proxied web servers.
+- **Настройка хранилища кеша (`proxy_cache_path`):** Я реализовал двухуровневую файловую структуру `levels=1:2`, выделил 10 МБ разделяемой памяти для зоны ключей `my_cache:10m` (она вмещает примерно 80 000 ключей), ограничил максимальный объём на диске 10 ГБ (`max_size=10g`) и настроил автоматическую очистку неиспользуемых записей через 60 минут (`inactive=60m`).
+- **Правила инвалидации и валидности (`proxy_cache_valid`):** Успешные ответы с кодом `200 OK` я кеширую ровно на 1 минуту (`1m`). Ошибочные ответы и запросы, требующие авторизации с невалидным токеном (HTTP 401), не кешируются — так система мгновенно реагирует на изменение прав доступа.
+- **Отладочные заголовки трассировки:**
+  - `add_header X-Cache-Status $upstream_cache_status always;` — этот заголовок сообщает клиенту статус кеша (`MISS` — запрос ушёл на бэкенд, `HIT` — ответ сразу из памяти или диска Nginx);
+  - `add_header X-Upstream-Addr $upstream_addr always;` — фиксирует внутренний IP/порт бэкенда, который обработал запрос (при `HIT` заголовок будет пустым, потому что бэкенд не задействован).
 
-Proxying in Nginx is done by processing a request sent to the Nginx server and passing it to other servers for actual processing. The result of the request is sent back to Nginx, which then passes the information to the client. The other servers in this case can be remote machines, local servers, or even other virtual servers defined in the Nginx configuration. The servers accessed by the Nginx proxy are called upstream servers.
+### 4. Потоковая GZIP‑компрессия трафика
 
-Sample configuration file to configure Nginx as a reverse proxy for HTTP server:
+- **Оптимизация полосы пропускания:** Я снизил сетевую нагрузку и ускорил передачу данных клиентам за счёт сжатия ответов на лету.
+- **Тонкая настройка директив:**
+  - `gzip_comp_level 6` — это даёт оптимальный баланс между степенью сжатия и нагрузкой на CPU сервера;
+  - `gzip_min_length 1100` — отсекает микроответы меньше 1,1 КБ: их сжатие невыгодно из‑за накладных расходов на заголовки;
+  - `gzip_proxied any` — включает сжатие для всех проксированных запросов;
+  - `gzip_vary on` — добавляет HTTP‑заголовок `Vary: Accept-Encoding`, чтобы корректно работали промежуточные CDN и браузерные кеши;
+  - `gzip_types` — я оставил строгий белый список MIME‑типов (`text/*`, `application/json`, `application/javascript`, `text/xml` и др.). Изображения (`image/png`, `image/jpeg`) не сжимаю: у них и так высокая степень встроенной энтропии.
 
+### 5. Локальный HTTPS/TLS и криптографическая безопасность
+
+- **Генерация самоподписанного сертификата X.509:** Я написал автоматизированный скрипт `generate-cert.sh` на OpenSSL:
+  - 2048‑битный RSA‑ключ (`rsa:2048`);
+  - хэш‑алгоритм SHA‑256;
+  - расширение `subjectAltName = DNS:be3.shop` — оно нужно, чтобы домен корректно валидировался современными браузерами и HTTP‑клиентами;
+  - срок действия сертификата — 365 дней;
+  - права на закрытый ключ я ограничил командой `chmod 600 be3.shop.key`.
+- **Локальный DNS‑маппинг:** Настройте маршрутизацию доменного имени `be3.shop` на локальный интерфейс петли `127.0.0.1` через системный файл `/etc/hosts`.
+
+### 6. Микросервисная архитектура и межсервисный gRPC (Protobuf)
+
+- **Декомпозиция ответственности:** Я выделил отдельный сервис `authapp`, который полностью отвечает за криптографическую обработку паролей (bcrypt), формирование JWT‑токенов (HS256) и аутентификацию пользователей.
+- **Высокоскоростной транспорт gRPC:** Сервис магазина (`shopapp`) взаимодействует с `authapp` по бинарному протоколу HTTP/2 через сгенерированные Protobuf‑контракты (`auth.proto`). Это даёт минимальные задержки и строгую типизацию сообщений.
+- **Централизованная верификация токенов:** Middleware `UserAuthenticator` в `shopapp` для каждого защищённого запроса валидирует Bearer‑токен через gRPC‑вызов `ValidateToken` к сервису Auth — так я гарантирую актуальность сессии.
+
+### 7. Изоляция данных в PostgreSQL и Read‑Only реплики
+
+- **Разделение баз данных:** Я создал независимые базы данных `shop` и `shop_auth` на отдельных инстансах СУБД, чтобы соблюсти принцип Database‑per‑Service.
+- **Принцип наименьших привилегий (Least Privilege):**
+  - Главный инстанс `shopapp` работает под суперпользователем `postgres` с полными правами DDL/DML;
+  - Инстансы `shopapp_read1` и `shopapp_read2` подключаются под специально созданной учётной записью `shop_reader`, у которой есть только право `SELECT` на таблицы схемы `public`. Любая попытка выполнить `INSERT`/`UPDATE`/`DELETE` на репликах чтения приведёт к ошибке СУБД.
+
+### 8. Чистая архитектура (Clean Architecture) и DI (Uber Fx)
+
+- **Многослойный дизайн бэкенда Shop:**
+  - `domain`: чистые бизнес‑сущности (`Product`, `Client`, `Supplier`, `Address`, `Image`) и интерфейсы репозиториев (`ProductRepository`, `SupplierRepository` и др.);
+  - `web`: DTO с JSON‑тегами, HTTP‑хэндлеры на базе `net/http` (с роутингом Go 1.22+), DTO‑мапперы, валидация входных структур (`DisallowUnknownFields`);
+  - `repository`: слой данных на `pgxpool.Pool` (PostgreSQL), DAO‑структуры, SQL‑мапперы и транзакционные операции (например, атомарное обновление адресов).
+- **Граф зависимостей Uber Fx:** Я реализовал полную декларативную инициализацию пула БД, gRPC‑клиентов, репозиториев, хэндлеров и запуск HTTP‑сервера через `fx.Provide` и `fx.Invoke`.
+
+---
+
+## Архитектура и сетевая топология
+
+### Схема взаимодействия компонентов
+
+```text
+                               Клиентские запросы
+                        (Браузер, cURL, Swagger UI)
+                                     │
+                    ┌────────────────┴────────────────┐
+                    │  HTTPS (443) / HTTP (80)        │
+                    ▼                                 ▼
+         ┌─────────────────────────────────────────────────────────┐
+         │                   NGINX Reverse Proxy                   │
+         │                  (Container: nginx)                     │
+         │   TLS Termination / GZIP / Caching / Map Routing        │
+         └───────┬──────────────┬──────────────┬─────────────┬─────┘
+                 │              │              │             │
+        GET /    │     /status  │     /admin/  │             │ /api/v1/
+   (Static files)│ (stub_status)│ (pgAdmin Web)│             │
+                 ▼              ▼              ▼             ▼
+          ┌─────────────┐ ┌───────────┐ ┌─────────────┐ ┌─────────────────────────┐
+          │  /data/www  │ │   Nginx   │ │   pgAdmin   │ │   Load Balancer (Map)   │
+          │ index.html  │ │  Metrics  │ │ (pgadmin)   │ │ GET -> shop_read (2:1:1)│
+          │ image.png   │ └───────────┘ └──────┬──────┘ │ Other -> shop_write (1) │
+          └─────────────┘                      │        └────────────┬────────────┘
+                                               │                     │
+                        ┌──────────────────────┘                     │
+                        │                                            │
+                        ▼                                            ▼
+                 ┌──────────────┐                       ┌─────────────────────────┐
+                 │  PostgreSQL  │◄──────────────────────┤  shopapp (Port 8080)    │ (Weight: 2)
+                 │   (shopdb)   │   Read/Write          │  (Master: RW Instance)  │
+                 │              │                       └────────────┬────────────┘
+                 │              │◄──────────────────────┐            │
+                 │              │   Read-Only (SELECT)  │            │
+                 │              │                       ├────────────┼────────────┐
+                 │              │◄────────┐             │            │            │
+                 └──────────────┘         │             │            │            │
+                                          │             ▼            ▼            ▼
+                                   ┌──────┴──────────────┐   ┌───────┴─────────────┐
+                                   │ shopapp_read1 (8080)│   │ shopapp_read2 (8080)│
+                                   │ (Weight: 1, RO)     │   │ (Weight: 1, RO)     │
+                                   └──────────┬──────────┘   └───────┬─────────────┘
+                                              │                      │
+                                              │    gRPC :50051       │
+                                              └──────────┬───────────┘
+                                                         │
+                                                         ▼
+                                              ┌─────────────────────┐
+                                              │       authapp       │
+                                              │ (Auth gRPC Service) │
+                                              └──────────┬──────────┘
+                                                         │
+                                                         ▼
+                                              ┌─────────────────────┐
+                                              │     PostgreSQL      │
+                                              │      (authdb)       │
+                                              └─────────────────────┘
 ```
-server {
-    listen 80;
-    server_name www.example.com example.com;
 
-    location /app {
-       proxy_pass http://127.0.0.1:8080;
-    }
+---
+
+### Стек технологий
+
+| Технология / Компонент | Версия / Спецификация | Назначение в проекте |
+| :--- | :--- | :--- |
+| **Go** | `1.25.6` (Shop) / `1.26.8` (Auth) | Основной язык микросервисов, стандартная библиотека `net/http` |
+| **Nginx** | `1.30.6-alpine` | Обратный прокси, балансировщик нагрузки 2:1:1, кеширующий сервер, SSL/TLS, GZIP |
+| **gRPC** | `v1.84.0` | Высокопроизводительный бинарный межсервисный транспорт |
+| **Protocol Buffers** | `v1.36.12` | Схема контрактов авторизации (`api/auth.proto`) |
+| **PostgreSQL** | `18.1-alpine` | Реляционные базы данных (`shopdb` и `authdb`) |
+| **pgx** | `v5.11.0` | Высокоэффективный Go-драйвер и пул соединений `pgxpool` |
+| **Uber Fx** | `v1.24.0` | Фреймворк внедрения зависимостей (Dependency Injection) |
+| **golang-jwt/jwt** | `v5.3.1` | Выпуск, верификация и подпись токенов JWT (HS256) |
+| **golang.org/x/crypto** | `v0.58.0` | Криптографическое хэширование паролей (bcrypt) |
+| **Swagger / Swaggo** | `v2.0.2` | Автоматическая генерация и отображение интерактивной OpenAPI-документации |
+| **pgAdmin 4** | `dpage/pgadmin4` | Веб-интерфейс администрирования PostgreSQL |
+| **Docker & Compose** | `Compose Spec` | Оркестрация стека из 8 независимых контейнеров |
+| **OpenSSL** | `x509 / RSA 2048` | Генерация самоподписанного TLS-сертификата с поддержкой SAN |
+
+---
+
+## Маршрутизация Nginx и спецификация API
+
+### 1. Маршрутизация Nginx
+
+| Путь (Location) | Назначение / Поведение | Проксирование / Директива |
+| :--- | :--- | :--- |
+| `/` | Раздача статического контента | `root /data/www` (`index.html`, `image.png`) |
+| `/status` | Статистика соединений и состояния Nginx | Директива `stub_status` |
+| `/admin/` | Веб-интерфейс администрирования pgAdmin | `proxy_pass http://pgadmin/` с `X-Script-Name /admin` |
+| `/api/v1` | Точное совпадение: редирект на документацию Swagger | HTTP `302 Found` -> `/swagger/index.html` |
+| `/swagger/` | Статика и интерфейс Swagger UI | `proxy_pass http://shopapp:8080` |
+| `/api/v1/` | Полнофункциональный REST API магазина | `proxy_pass http://$shop_backend;` (балансировка `GET`, кеш `1m`, заголовки отладки) |
+| `/api/` | Короткий псевдоним API | `proxy_pass http://shopapp:8080/api/v1/;` |
+
+---
+
+### 2. Спецификация REST API Shop Service
+
+#### Аутентификация и сессии (через gRPC-вызовы к Auth Service)
+
+| Метод | Путь | Доступ | Назначение |
+| :--- | :--- | :--- | :--- |
+| `POST` | `/api/v1/register` | Публичный | Регистрация нового пользователя (login, email, password, profile) |
+| `POST` | `/api/v1/auth` | Публичный | Аутентификация, выдача пары `access_token` и `refresh_token` |
+| `POST` | `/api/v1/refresh` | Публичный | Ротация и обновление токенов по действующему Refresh-токену |
+| `POST` | `/api/v1/reset` | Публичный | Запрос на сброс пароля пользователя |
+| `POST` | `/api/v1/change_password` | Bearer JWT | Смена текущего пароля на новый |
+
+#### Товары (Products)
+
+| Метод | Путь | Доступ | Назначение | Балансировка / Кеш |
+| :--- | :--- | :--- | :--- | :--- |
+| `GET` | `/api/v1/products` | Bearer JWT | Список доступных товаров с пагинацией (`page`, `size`) | Да (2:1:1), Кеш 1m |
+| `GET` | `/api/v1/products/{id}` | Bearer JWT | Детальная информация о товаре по UUID | Да (2:1:1), Кеш 1m |
+| `POST` | `/api/v1/products` | Bearer JWT | Создание новой позиции товара в каталоге | Master only (`shopapp`) |
+| `PATCH` | `/api/v1/products/{id}/stock` | Bearer JWT | Уменьшение складского остатка товара | Master only (`shopapp`) |
+| `DELETE` | `/api/v1/products/{id}` | Bearer JWT | Удаление товара по UUID | Master only (`shopapp`) |
+
+#### Адреса (Addresses)
+
+| Метод | Путь | Доступ | Назначение | Балансировка / Кеш |
+| :--- | :--- | :--- | :--- | :--- |
+| `GET` | `/api/v1/addresses` | Bearer JWT | Список адресов с пагинацией | Да (2:1:1), Кеш 1m |
+| `POST` | `/api/v1/addresses` | Bearer JWT | Добавление нового адреса (country, city, street) | Master only (`shopapp`) |
+| `PUT` | `/api/v1/addresses/{id}` | Bearer JWT | Обновление информации об адресе | Master only (`shopapp`) |
+| `DELETE` | `/api/v1/addresses/{id}` | Bearer JWT | Безопасное удаление адреса (если нет внешних связей) | Master only (`shopapp`) |
+
+#### Клиенты (Clients)
+
+| Метод | Путь | Доступ | Назначение | Балансировка / Кеш |
+| :--- | :--- | :--- | :--- | :--- |
+| `GET` | `/api/v1/clients` | Bearer JWT | Список зарегистрированных клиентов с пагинацией | Да (2:1:1), Кеш 1m |
+| `POST` | `/api/v1/clients` | Bearer JWT | Создание профиля клиента с привязкой к адресу | Master only (`shopapp`) |
+| `PUT` | `/api/v1/clients/{id}/address`| Bearer JWT | Атомарная транзакционная смена адреса клиента | Master only (`shopapp`) |
+| `DELETE` | `/api/v1/clients/{id}` | Bearer JWT | Удаление клиента по UUID | Master only (`shopapp`) |
+
+#### Поставщики (Suppliers)
+
+| Метод | Путь | Доступ | Назначение | Балансировка / Кеш |
+| :--- | :--- | :--- | :--- | :--- |
+| `GET` | `/api/v1/suppliers` | Bearer JWT | Список поставщиков с пагинацией | Да (2:1:1), Кеш 1m |
+| `GET` | `/api/v1/suppliers/{id}` | Bearer JWT | Получение данных поставщика по UUID | Да (2:1:1), Кеш 1m |
+| `POST` | `/api/v1/suppliers` | Bearer JWT | Регистрация нового поставщика | Master only (`shopapp`) |
+| `PUT` | `/api/v1/suppliers/{id}/address`| Bearer JWT| Транзакционное обновление адреса поставщика | Master only (`shopapp`) |
+| `DELETE` | `/api/v1/suppliers/{id}` | Bearer JWT | Удаление поставщика | Master only (`shopapp`) |
+
+#### Изображения (Images)
+
+| Метод | Путь | Доступ | Назначение | Балансировка / Кеш |
+| :--- | :--- | :--- | :--- | :--- |
+| `GET` | `/api/v1/images/{id}` | Bearer JWT | Скачивание бинарного файла изображения по ID | Да (2:1:1), Кеш 1m |
+| `GET` | `/api/v1/products/{id}/image`| Bearer JWT | Скачивание бинарного изображения, привязанного к товару | Да (2:1:1), Кеш 1m |
+| `POST` | `/api/v1/products/{id}/image`| Bearer JWT | Загрузка и привязка нового изображения к товару | Master only (`shopapp`) |
+| `PUT` | `/api/v1/images/{id}` | Bearer JWT | Замена бинарных данных существующего изображения | Master only (`shopapp`) |
+| `DELETE` | `/api/v1/images/{id}` | Bearer JWT | Удаление изображения | Master only (`shopapp`) |
+
+---
+
+### 3. Спецификация gRPC сервиса Auth (`AuthService`)
+
+| RPC Метод | Входное сообщение | Выходное сообщение | Описание |
+| :--- | :--- | :--- | :--- |
+| `Signup` | `SignupRequest` | `TokensResponse` | Регистрация нового пользователя, хэширование пароля через bcrypt, генерация JWT |
+| `Signin` | `SigninRequest` | `TokensResponse` | Проверка учетных данных пользователя и выдача пары Access/Refresh токенов |
+| `Refresh` | `RefreshTokensRequest` | `TokensResponse` | Ротация токенов: проверка refresh-токена и выдача новой пары |
+| `ValidateToken` | `AccessTokenRequest` | `EmptyMessage` | Быстрая верификация подписи и срока действия access-токена для middleware |
+| `ResetPassword` | `ResetPasswordRequest` | `EmptyMessage` | Сброс пароля пользователя с генерацией временного пароля |
+| `ChangePassword` | `ChangePasswordRequest` | `EmptyMessage` | Проверка старого пароля и установка нового |
+| `User` | `UserRequest` | `UserResponse` | Получение атрибутов профиля пользователя по ID или логину |
+
+---
+
+## Структура проекта и реализованные модули
+
+| Файл / Каталог | Назначение и функционал | Реализованные паттерны и концепции |
+| :--- | :--- | :--- |
+| `src/docker-compose.yml` | Декларативная оркестрация 8 сервисов стека | Healthchecks, Volumes, зависимости `condition: service_healthy`, изолированные сети |
+| `src/Makefile` | Сценарии автоматизации сборки и запуска | Таргеты `all`, `run`, `clean`, `rebuild`, `genproto`, `genswag` |
+| `src/.env.template` | Шаблон переменных окружения сервисов | Параметры БД, порты, секретные ключи JWT и время жизни токенов |
+| `src/nginx/default.conf` | Конфигурация Nginx: реверс-прокси, SSL, балансировка | `upstream`, `map $request_method`, `proxy_cache`, `gzip`, `stub_status` |
+| `src/nginx/generate-cert.sh` | Генерация самоподписанного сертификата X.509 | OpenSSL, RSA 2048, SHA-256, Subject Alternative Name (SAN) |
+| `src/nginx/html/` | Каталог статических файлов веб-сервера | `index.html` и статическое изображение `image.png` |
+| `src/api/auth.proto` | Контракт Protocol Buffers сервиса авторизации | Описание сообщений и интерфейса `AuthService` для генерации gRPC-кода |
+| `src/shop/cmd/main.go` | Точка входа в сервис магазина | Инициализация Uber Fx, подключение gRPC-клиента, маршрутизация HTTP, Swagger |
+| `src/shop/internal/domain/` | Доменные модели и контракты интерфейсов | Чистые модели `model.go`, интерфейсы `*_repository.go` без внешних зависимостей |
+| `src/shop/internal/web/` | Слой представления и REST API | DTO, хэндлеры `handler/`, мапперы `mapper/`, middleware аутентификации |
+| `src/shop/internal/repository/`| Слой работы с базой данных PostgreSQL | Инициализация `pgxpool`, DAO, SQL-мапперы, скрипты `schema.sql` и `readonly.sql` |
+| `src/auth/cmd/server/server.go`| Точка входа в gRPC-сервис авторизации | Uber Fx модули `data`, `auth`, `shared`, запуск `grpc.Server` на TCP-порту |
+| `src/auth/internal/auth/` | Бизнес-логика авторизации и JWT | Провайдер JWT, кеш токенов, валидация сессий, хэширование паролей |
+| `src/auth/internal/data/` | Репозиторий пользователей сервиса Auth | PostgreSQL операции для пользователей, ролей и хэшей |
+| `src/test/test.md` | Инструкция и скрипты верификации инфраструктуры | JS-скрипты проверки балансировки (2:1:1) и кеширования (MISS/HIT) |
+
+---
+
+## Инструкция по сборке, настройке и запуску
+
+### Предварительные требования
+
+- **Docker** и **Docker Compose** (рекомендуется Docker Desktop или Docker Engine 24+);
+- **OpenSSL** (для генерации TLS-сертификатов);
+- Утилита `curl` и современный браузер (для функционального тестирования).
+
+---
+
+### Шаг 1. Настройка локального DNS
+
+Для корректной маршрутизации по доменному имени `be3.shop` добавьте запись в системный файл `/etc/hosts`:
+
+```bash
+# Добавление сопоставления be3.shop -> 127.0.0.1
+echo "127.0.0.1 be3.shop" | sudo tee -a /etc/hosts
+```
+
+---
+
+### Шаг 2. Генерация SSL/TLS-сертификата
+
+Сгенерируйте самоподписанный X.509 сертификат и закрытый ключ для домена `be3.shop`:
+
+```bash
+cd BE3_Nginx_Pro_ID_1269323-2-develop/src
+./nginx/generate-cert.sh
+```
+
+*Скрипт создаст файлы `be3.shop.crt` и `be3.shop.key` в директории `src/nginx/certs` с корректными правами доступа (`chmod 600`).*
+
+---
+
+### Шаг 3. Подготовка переменных окружения
+
+Скопируйте шаблон переменных окружения:
+
+```bash
+cp .env.template .env
+```
+
+*Файл `.env` содержит базовые настройки для баз данных `shop` и `shop_auth`, учетные данные pgAdmin и параметры генерации токенов JWT.*
+
+---
+
+### Шаг 4. Сборка и запуск контейнеров
+
+Запустите мультиконтейнерный стек с помощью команды `make run` или напрямую через Docker Compose:
+
+```bash
+docker compose up -d --build
+```
+
+#### Запускаемые контейнеры:
+1. `nginx` — прокси-сервер на портах `80` и `443`;
+2. `shopapp` — основной Master Go-бэкенд магазина (чтение и запись, порт `8080`);
+3. `shopapp_read1` — первая реплика чтения магазина (порт `8081`);
+4. `shopapp_read2` — вторая реплика чтения магазина (порт `8082`);
+5. `authapp` — микросервис авторизации на gRPC (порт `50051`);
+6. `shopdb` — база данных PostgreSQL магазина (порт `5432`);
+7. `authdb` — база данных PostgreSQL сервиса авторизации;
+8. `pgadmin` — веб-панель управления PostgreSQL.
+
+---
+
+### Шаг 5. Проверка статуса сервисов
+
+Убедитесь, что все контейнеры успешно стартовали и находятся в статусе `Up` (а базы данных — в `healthy`):
+
+```bash
+docker compose ps
+```
+
+---
+
+## Проверка и тестирование функционала
+
+### 1. Проверка статического контента и HTTPS
+
+Откройте в браузере или запросите через `curl` главную страницу:
+```bash
+curl -k https://be3.shop/
+```
+**Результат:** Возвращается HTML-страница `index.html` с тегом `<img src="/image.png">`. Картинка доступна по адресу `https://be3.shop/image.png`.
+
+---
+
+### 2. Мониторинг метрик Nginx (`stub_status`)
+
+Запросите внутреннюю статистику Nginx:
+```bash
+curl -k https://be3.shop/status
+```
+**Пример ответа:**
+```text
+Active connections: 2 
+server accepts handled requests
+ 48 48 112 
+Reading: 0 Writing: 1 Waiting: 1 
+```
+
+---
+
+### 3. Интерактивная документация Swagger UI
+
+Откройте в браузере адрес:
+```text
+https://be3.shop/api/v1
+```
+*Nginx автоматически выполнит 302-редирект на `https://be3.shop/swagger/index.html`, где доступен интерактивный интерфейс OpenAPI со всеми маршрутами, описанием схем запросов и кнопкой авторизации.*
+
+---
+
+### 4. Панель управления pgAdmin
+
+Откройте панель управления СУБД:
+```text
+https://be3.shop/admin/
+```
+- **Email:** `admin@example.com` (из `.env`);
+- **Пароль:** `pgadmin` (из `.env`).
+
+---
+
+### 5. Тестирование балансировки нагрузки (2:1:1)
+
+Для подтверждения весового распределения GET-запросов между тремя инстансами (`shopapp`, `shopapp_read1`, `shopapp_read2`) в пропорции **2:1:1** выполните скрипт в консоли разработчика браузера (F12 на странице `https://be3.shop`):
+
+```javascript
+const counts = {};
+
+for (let i = 0; i < 40; i++) {
+  const response = await fetch('/api/v1/products');
+  const backend = response.headers.get('X-Upstream-Addr');
+  counts[backend] = (counts[backend] || 0) + 1;
+}
+
+console.table(counts);
+```
+
+**Ожидаемый результат распределения из 40 запросов:**
+- Инстанс `shopapp` (Master, вес 2): ~**20 запросов (50%)**;
+- Инстанс `shopapp_read1` (Реплика, вес 1): ~**10 запросов (25%)**;
+- Инстанс `shopapp_read2` (Реплика, вес 1): ~**10 запросов (25%)**.
+
+*Без авторизационного токена API возвращает `401 Unauthorized` — эти ответы не кешируются, что позволяет наглядно отследить выбор бэкенда для каждого запроса по заголовку `X-Upstream-Addr`.*
+
+---
+
+### 6. Тестирование кеширования Nginx (`proxy_cache`)
+
+Получите токен доступа (см. сценарий cURL ниже) и выполните в консоли браузера два последовательных запроса к одному и тому же URL:
+
+```javascript
+{
+  const token = prompt('Вставьте access_token');
+  const url = `/api/v1/products?demo=${crypto.randomUUID()}`;
+  const results = [];
+
+  for (let i = 1; i <= 2; i++) {
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${token}` },
+      cache: 'no-store'
+    });
+    await response.text();
+
+    results.push({
+      Запрос: i,
+      HTTP: response.status,
+      Кеш: response.headers.get('X-Cache-Status'),
+      Бэкенд: response.headers.get('X-Upstream-Addr')
+    });
+  }
+
+  console.table(results);
 }
 ```
-The URL of the proxy server is set with the proxy_pass directive and can use HTTP or HTTPS as the protocol, a domain name or IP address, and an optional port and URI as the address.
 
-The above configuration tells Nginx to send all requests to /app to the proxy server at http://127.0.0.1:8080.
+**Результат в консоли:**
 
-### Caching
+| Запрос | HTTP | Кеш (`X-Cache-Status`) | Бэкенд (`X-Upstream-Addr`) | Пояснение |
+| :--- | :--- | :--- | :--- | :--- |
+| **1** | `200` | **`MISS`** | `172.x.x.x:8080` | Запрос передан на один из бэкендов, ответ записан в кеш Nginx |
+| **2** | `200` | **`HIT`** | `null` | Ответ мгновенно отдан из кеша Nginx без обращения к бэкенду |
 
-**Caching** allows web applications to improve performance by using previously stored data, such as responses to network requests or calculation results. Caching allows the server to process requests for the same data more quickly when the client requests the same data again.
+---
 
-Caching is an efficient architectural pattern because most programs often access the same data and instructions. This technology exists at all levels of computer systems. Processors, disks, servers, and browsers all have caches.
+### 7. Тестирование GZIP-сжатия
 
-The web server can be configured to cache responses so that it does not have to keep sending similar requests to the server application. Similarly, the main application can cache some of its own responses to resource-intensive database queries or common file requests.
-
-Only two directives are needed to enable basic caching in Nginx: **proxy_cache_path** and **proxy_cache**. The **proxy_cache_path** directive sets the cache path and configuration, and the **proxy_cache** directive enables it.
+Проверьте наличие сжатия для текстовых ответов:
+```bash
+curl -k -I -H "Accept-Encoding: gzip" https://be3.shop/swagger/doc.json
 ```
-proxy_cache_path /path/to/cache levels=1:2 keys_zone=my_cache:10m max_size=10g inactive=60m use_temp_path=off;
+**В заголовках ответа присутствует:**
+```http
+Content-Encoding: gzip
+Vary: Accept-Encoding
+```
 
-server {
-    # ...
-    location / {
-        proxy_cache my_cache;
-        proxy_pass http://my_upstream;
-    }
+При запросе статического изображения компрессия отсутствует, как и заложено в конфигурации:
+```bash
+curl -k -I -H "Accept-Encoding: gzip" https://be3.shop/image.png
+```
+*Заголовок `Content-Encoding: gzip` отсутствует, бинарные данные отдаются в исходном виде.*
+
+---
+
+### 8. Сценарий работы с API через cURL
+
+#### 1. Регистрация нового пользователя
+```bash
+curl -k -X POST https://be3.shop/api/v1/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "login": "manager1",
+    "password": "Password123!",
+    "email": "manager1@shop.com",
+    "name": "Ivan",
+    "surname": "Ivanov",
+    "phonenumber": "+79991234567"
+  }'
+```
+
+#### 2. Аутентификация и получение JWT-токенов
+```bash
+curl -k -X POST https://be3.shop/api/v1/auth \
+  -H "Content-Type: application/json" \
+  -d '{
+    "login": "manager1",
+    "password": "Password123!"
+  }'
+```
+**Ответ:**
+```json
+{
+  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
 }
 ```
 
-This example sets the global configuration for caching:
-- var/cache/nginx — cache path;
-
-- levels — directory nesting level. In this example, we set the configuration to create a directory with the cache and another directory in it;
-
-- keys_zone — the name of the zone in shared memory where the cache will be stored, and its size;
-
-- inactive — the time after which the cache is automatically cleared;
-
-- max_size — the maximum size of the cache. When the cache runs out of space, Nginx will remove the outdated data itself.
-
-### Balancing
-Load **balancing** is the efficient distribution of incoming network traffic across a group of backend servers. The role of the controller is to distribute the load across multiple installed backend servers.
-
-Load balancing helps you scale your application by handling traffic spikes without increasing cloud costs. It also helps eliminate the single point of failure problem. Because the load is distributed, if one of the servers fails, the service will continue to run.
-
-**Nginx as a Load Balancer**
-
-Load Balancing Methods: The following load balancing mechanisms (or methods) are supported in Nginx:
-- round-robin — requests to application servers are distributed cyclically;
-- least-connected — the next request is assigned to the server with the lowest number of active connections;
-- ip-hash — the hash function used to determine which server should be chosen for the next request (based on the client's IP address).
-
-The simplest configuration for load balancing with Nginx might look like this (round-robin is used by default):
-
-```http {
-    upstream myapp1 {
-        server srv1.example.com;
-        server srv2.example.com;
-        server srv3.example.com;
-    }
-
-    server {
-        listen 80;
-
-        location / {
-            proxy_pass http://myapp1;
-        }
-    }
-}
-```
-An example of using the least-connected method for balancing:
-```
-upstream myapp1 {
-        least_conn;
-        server srv1.example.com;
-        server srv2.example.com;
-        server srv3.example.com;
-    }
+#### 3. Добавление адреса (Master Only)
+```bash
+curl -k -X POST https://be3.shop/api/v1/addresses \
+  -H "Authorization: Bearer <ACCESS_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "country": "Россия",
+    "city": "Москва",
+    "street": "Тверская, 1"
+  }'
 ```
 
-### Compression
-Enabling web page compression is a simple and effective way to increase the loading speed of your website. When the GZIP compressor is enabled, the flow of information transmitted from the server to the browser is recoded on the fly. As a result, the client browser receives the traffic in a compressed form (minimum size), which it unpacks upon receipt.
-
-**GZIP compression** is successfully applied to textual information used for most web resources (including files with .html, .js, .css, .svg extensions).
-
-A general configuration for GZIP compression might look like this:
-
-```
-server {
-    gzip on;
-    gzip_vary on;
-    gzip_proxied any;
-    gzip_comp_level 6;
-    gzip_buffers 16 8k;
-    gzip_http_version 1.1;
-    gzip_min_length 1100;
-    gzip_types text/plain text/css application/json application/x-javascript text/xml application/xml application/xml+rss text/javascript application/javascript application/vnd.ms-fontobject application/x-font-ttf font/opentype image/svg+xml image/x-icon;
-    ...
-}
-```
-- gzip on — enables support for GZIP compression;
-
-- gzip_disable "msie6" — excludes IE6 from receiving compressed files. (does not support GZIP);
-
-- gzip_buffers — specifies the number and size of buffers to compress the response into. By default, the size of a buffer is equal to the size of the page. This is either 4K or 8K, depending on the platform;
-
-- gzip_proxied — compresses responses for proxy servers;
-
-- gzip_vary on — includes the addition of the "Vary: Accept-Encoding" header to the response; for IE4-6 this will cause the data not to be cached due to the bug;
-
-- gzip_comp_level 6 — sets the number of files to compress. The higher the number, the higher the compression level and resource usage. Compression levels: 1 — minimum, 9 — maximum;
-
-- gzip_http_version 1.1 — its directive is used to limit gzip compression for browsers that support the HTTP/1.1 protocol. If the browser does not support it, it probably does not support gzip;
-
-- gzip_min_length 1100 — tells Nginx not to compress files smaller than 256 bytes;
-
-- gzip_types — shows all MIME types that will be compressed. In this case, the list includes HTML pages, CSS stylesheets, Javascript and JSON files, XML files, icons, SVG images, and web fonts.
-
-### HTTPS, TLS, SSL 
-
-The problem with the HTTP protocol is that data is transmitted over the network in clear, unencrypted form. This allows an intruder to eavesdrop on transmitted packets and extract any information from the parameters, headers, and body of the message. To address this vulnerability, **HTTPS** (the S at the end stands for secure) was developed — it is not a separate protocol, just HTTP over **SSL** (and later **TLS**), but it allows secure data exchange. Unlike HTTP, which uses the standard TCP/IP port 80, **HTTPS** uses port 443.
-
-**SSL**
-
-Secure Sockets Layer (SSL) is a cryptographic protocol that provides secure communication between a user and a server over an insecure network. It sits between the transport layer and the client program layer (FTP, HTTP, etc.). It was first introduced to the public in 1995, but has been recognized as fully deprecated since 2015. TLS 1.0 was developed in 1996 based on the SSL 3.0 specification.
-
-**TLS**
-
-Transport Layer Security is an evolution of the ideas behind the SSL protocol. TLSv1.2 is currently current, TLSv1.3 has been in active use since August 2018, while TLSv1.1, TLSv1.0, SSLv3.0, SSLv2.0, SSLv1.0 are deprecated. The protocol provides services: privacy (hiding transmitted data), integrity (detecting changes), authentication (verifying authorship). They are achieved through hybrid encryption, i.e. the joint use of asymmetric and symmetric encryption.
-
-To configure the HTTPS server, you should enable the ssl parameter on listening sockets in the server block and specify the location of files containing the server certificate and secret key:
-```
-server {
-    listen              443 ssl;
-    server_name         www.example.com;
-    ssl_certificate     www.example.com.crt;
-    ssl_certificate_key www.example.com.key;
-    ssl_protocols       TLSv1 TLSv1.1 TLSv1.2;
-    ssl_ciphers         HIGH:!aNULL:!MD5;
-    ...
-}
-```
-The server certificate is public. It is sent to every client that connects to the server. The private key should be stored in a restricted file (the permissions should allow the main Nginx process to read this file). The secret key can also be stored in the same file as the certificate:
-
-```
-    ssl_certificate     www.example.com.cert;
-    ssl_certificate_key www.example.com.cert;
-```
-Access rights to the file must also be restricted. Although both the certificate and the key are stored in the same file, only the certificate is sent to the client.
-
-The ssl_protocols and ssl_ciphers directives can be used to restrict connections to "strong" versions and SSL/TLS ciphers only. By default, Nginx uses "ssl_protocols TLSv1 TLSv1.1 TLSv1.2" and "ssl_ciphers HIGH:!aNULL:!MD5", so it is generally not necessary to configure them.
-
-###  HTTP 2/0, ServerPush
-
-**HTTP/2**
-
-In 2014, the HTTP/2 specification was approved as a standard, and as of 2015, it is supported in all major browsers. New features include
-
-- Multiplexed Asynchronous Transfer: On the same connection, requests are divided into alternating packets that are grouped into separate streams.
-
-- Requests are prioritized, eliminating the problem of sending all requests at once.
-
-- Compression of HTTP headers is implemented. Each sent header contains information about the sender and recipient, and this is excessive. Thanks to compression, full information is sent only in the first header, and there is no such information in subsequent headers.
-
-- Unlike the text-based HTTP protocol, HTTP/2 is binary. This allows for the handling of small messages that are assembled into larger ones.
-
-- In HTTP/1.1, multiple parallel TCP connections were used to transfer different types of data quickly. In the new version, all data can be transferred using a single connection. The need to make only one connection greatly reduces the time it takes to deliver content.
-
-- Server Push. In HTTP/1, the browser had to get the home page first and then understand what resources it needed to render it, but HTTP/2 allows you to send all the necessary resources at once the first time you address the server.
-
-These features make it possible to increase productivity without using workarounds and tricks.
-
-The main difference in this protocol is that it uses binary data instead of text data. Computers have more difficulty working with text than with the binary protocol. In addition, it is already difficult to imagine the modern Internet in a purely text-based format.
-
-![http2](misc/images/http2.png)
-
-**More about Server Push**
-
-Websites are always accessed in a request-response pattern: the user sends a request to a remote server, which, after some delay, sends back a response with the requested content.
-
-The initial request to the web server is usually for an HTML document. The server responds with the requested HTML resource. The resulting HTML document is then parsed by the browser, which extracts links to other resources, such as style sheets, scripts, and images. Once these are discovered, the browser sends a separate request for each resource and receives the appropriate responses.
-
-The problem with this mechanism is that it forces the user to wait for the browser to detect and retrieve the necessary resources after the HTML document loads. This delays rendering and increases load time.
-
-**Server Push** allows the server to preemptively "push" website resources to the client before the user explicitly requests them. In other words, we can send in advance what we know the user will need for the requested page.
-
-![server_push](misc/images/HTTP-2-Server-Push.png)
-
-**NGINX 1.13.9**, released on February 20, 2018, includes support for HTTP/2 pushing to the server. \
-To send resources on page load, use the http2_push directive as follows:
-
-```
-server {
-    listen 443 ssl http2;
-
-    ssl_certificate ssl/certificate.pem;
-    ssl_certificate_key ssl/key.pem;
-
-    root /var/www/html;
-
-    # when the client requests demo.html, also push 
-    # /style.css, /image1.jpg and /image2.jpg
-    location = /demo.html {
-        http2_push /style.css;
-        http2_push /image1.jpg;
-        http2_push /image2.jpg;
-    }
-}
+#### 4. Создание поставщика (Master Only)
+```bash
+curl -k -X POST https://be3.shop/api/v1/suppliers \
+  -H "Authorization: Bearer <ACCESS_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "ООO Главпоставка",
+    "address_id": "<ADDRESS_UUID>",
+    "phone_number": "+74951234567"
+  }'
 ```
 
-## Chapter II
+#### 5. Создание нового товара (Master Only)
+```bash
+curl -k -X POST https://be3.shop/api/v1/products \
+  -H "Authorization: Bearer <ACCESS_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Ноутбук Pro 16",
+    "category": "Электроника",
+    "price": 149990.00,
+    "available_stock": 25,
+    "supplier_id": "<SUPPLIER_UUID>"
+  }'
+```
 
-Let's move from theory to practice.
+#### 6. Получение списка товаров (балансировка 2:1:1 + кеш)
+```bash
+curl -k -i -X GET https://be3.shop/api/v1/products \
+  -H "Authorization: Bearer <ACCESS_TOKEN>"
+```
 
-In this block, you will need to:
-1. Configure reverse proxying to your application port.
-2. Configure Nginx for the routing part of the web application:
-  * Configure routing /api -> to /api/v1, which you developed in the 2 API block.
-  * On the /api/v1 path, output Swagger.
-  * Configure the stats distribution on the / path. Place 2 files in the root of the stats distribution — index.html and image.png.
-  * Configure /admin pgAdmin — GUI DBMS POSTGRES.
-  * Configure /status to return the Nginx server status page (Nginx status).
-3. Configure Nginx in the balancing section: 
-  * Run 2 more backend instances on different ports with read-only database access and set up GET request balancing for /api/v1 (/api/v2) in Nginx for 3 backends in a 2:1:1 ratio, with the first being the main backend server. 
-4. Configure caching (for all GET requests except /api).
-5. Configure gzip compression in Nginx. Compression should not be applied to media types (jpeg, png, etc.).
-6. You need to configure HTTPS on a local machine:
-  * Create a domain name on the local DNS server. Every computer has a local DNS repository where you can write your own site name and where this address will be resolved. It is not difficult to find information on how to do this.
-  * Create a self-signed certificate using openssl for the domain name you created and bind it in the Nginx config.
-  * Configure a reverse proxy for a running application.
+---
+
+### Остановка и очистка окружения
+
+Для остановки всех контейнеров:
+```bash
+docker compose down
+```
+
+Для полной остановки с удалением томов баз данных:
+```bash
+docker compose down -v
+# или: make clean
+```
